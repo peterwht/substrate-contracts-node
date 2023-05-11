@@ -98,6 +98,7 @@ enum FuncId {
     Query(Query),
     Transfer,
     TransferFrom,
+    TransferFromContract,
     Approve,
     IncreaseAllowance,
     DecreaseAllowance,
@@ -133,6 +134,7 @@ impl TryFrom<u16> for FuncId {
             0x4d47 => Self::Query(Query::Allowance),
             0xdb20 => Self::Transfer,
             0x54b3 => Self::TransferFrom,
+            0xDEAD => Self::TransferFromContract,
             0xb20f => Self::Approve,
             0x96d6 => Self::IncreaseAllowance,
             0xfecb => Self::DecreaseAllowance,
@@ -247,7 +249,7 @@ where
 
     let input: Psp22TransferInput<T::AssetId, T::AccountId, T::Balance> =
         env.read_as()?;
-    let sender = env.ext().address();
+    let sender = env.ext().caller();
 
     <pallet_assets::Pallet<T> as Transfer<T::AccountId>>::transfer(
         input.asset_id,
@@ -304,6 +306,48 @@ where
         "[ChainExtension]|call|transfer_from"
     );
     result.map_err(convert_err("ChainExtension failed to call transfer_from"))
+}
+
+fn transfer_from_contract<T, E>(env: Environment<E, InitState>) -> Result<(), DispatchError>
+where
+    T: pallet_assets::Config + pallet_contracts::Config,
+    <T as SysConfig>::AccountId: UncheckedFrom<<T as SysConfig>::Hash> + AsRef<[u8]>,
+    E: Ext<T = T>,
+{
+    let mut env = env.buf_in_buf_out();
+    let base_weight = <T as pallet_assets::Config>::WeightInfo::transfer();
+    // debug_message weight is a good approximation of the additional overhead of going
+    // from contract layer to substrate layer.
+    let overhead = Weight::from_ref_time(
+        <T as pallet_contracts::Config>::Schedule::get()
+            .host_fn_weights
+            .debug_message,
+    );
+    let charged_weight = env.charge_weight(base_weight.saturating_add(overhead))?;
+    trace!(
+        target: "runtime",
+        "[ChainExtension]|call|transfer / charge_weight:{:?}",
+        charged_weight
+    );
+
+    let input: Psp22TransferInput<T::AssetId, T::AccountId, T::Balance> =
+        env.read_as()?;
+    let sender = env.ext().address();
+
+    <pallet_assets::Pallet<T> as Transfer<T::AccountId>>::transfer(
+        input.asset_id,
+        sender,
+        &input.to,
+        input.value,
+        true,
+    )
+    .map_err(convert_err("ChainExtension failed to call transfer"))?;
+    trace!(
+        target: "runtime",
+        "[ChainExtension]|call|transfer"
+    );
+
+    Ok(())
 }
 
 fn approve<T, E>(env: Environment<E, InitState>) -> Result<(), DispatchError>
@@ -435,6 +479,7 @@ where
             FuncId::Query(func_id) => query::<T, E>(func_id, env)?,
             FuncId::Transfer => transfer::<T, E>(env)?,
             FuncId::TransferFrom => transfer_from::<T, E>(env)?,
+            FuncId::TransferFromContract => transfer_from_contract::<T, E>(env)?,
             // This is a bit of a shortcut. It was made because the documentation
             // for Mutate::approve does not specify the result of subsequent calls.
             FuncId::Approve | FuncId::IncreaseAllowance => approve::<T, E>(env)?,
